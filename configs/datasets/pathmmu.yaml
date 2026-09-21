@@ -1,0 +1,12 @@
+name: pathmmu
+annotations: data/raw/pathmmu/data.json
+image_root: data/raw/pathmmu/images
+dataset_repo: jamessyx/PathMMU
+dataset_revision: 054e64e56e599e9636024f1471d49ecae4a2784f
+sources: [PubMed, SocialPath, Atlas, EduContent, PathCLS]
+splits: [test, test_tiny]
+expected_questions: 9677
+expected_images: 7280
+paper_reported_images: 7213
+release_note: "Pinned public release has 9677 test questions and 7280 unique image names. Official instructions disclose an Atlas replacement with more images; exact equivalence to the original reported 7213 images is not established."
+input_kind: roi

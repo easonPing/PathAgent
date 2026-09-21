@@ -1,3 +1,5 @@
+> **论文优先复现分支**：当前可执行入口、参数差异和调度步骤见 [docs/REPRODUCTION.md](docs/REPRODUCTION.md)，已完成工作与剩余阻塞见 [docs/IMPLEMENTATION_STATUS.md](docs/IMPLEMENTATION_STATUS.md)。下面是作者原始 README；其中 CLAM/Quilt 和旧 pathagent CLI 不适用于本分支的新 runner。
+
 # [ECCV 2026] PathAgent: Toward Interpretable Analysis of Whole-slide Pathology Images via Large Language Model-based Agentic Reasoning 
 [![Project Page](https://img.shields.io/badge/Project-Page-green)](https://github.com/G14nTDo4/PathAgent)
 [![arXiv](https://img.shields.io/badge/arXiv-2511.17052-b31b1b.svg)](https://arxiv.org/abs/2511.17052)

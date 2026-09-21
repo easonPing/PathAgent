@@ -1,0 +1,77 @@
+schema_version: 1
+seed: 128
+models:
+  executor:
+    repo: Qwen/Qwen3-4B
+    revision: 1cfa9a7208912126459214e8b04321603b3df60c
+    path: checkpoints/qwen3-4b
+    dtype: bfloat16
+  perceptor:
+    repo: WenchuanZhang/Patho-R1-7B
+    revision: 7a69eb299bde72a4c3b8ec26fe0b17515346ef73
+    path: checkpoints/patho-r1-7b
+    dtype: bfloat16
+  navigator:
+    repo: vinid/plip
+    revision: 67ade53ddd32195868f422585f72698ef5d15094
+    path: checkpoints/plip
+    dtype: float32
+algorithm:
+  max_iterations: 5
+  initial_ratio: 0.10
+  replenish_ratio: 0.05
+  question_description_topk: 5
+  initial_magnification: 5
+  zoom_magnifications: [10, 20, 40]
+  relative_zoom_factors: [2, 4, 8]
+  zoom_query: missing_info
+  zoom_selected_children: 1
+  summary_threshold: 50
+  summary_chunk_size: 10
+generation:
+  enable_thinking: false
+  retries: 1
+  step_a_tokens: 512
+  step_b_tokens: 256
+  step_c_tokens: 256
+  generic_description_tokens: 512
+  question_description_tokens: 1024
+  final_tokens: 1024
+  summary_tokens: 512
+  executor_sampling: checkpoint
+  perceptor_sampling: checkpoint
+  final_do_sample: false
+  summary_do_sample: false
+preprocessing:
+  segmentation_model:
+    repo: MahmoodLab/hest-tissue-seg
+    revision: 4d24a57afbc450cac404d5e0b409adb480b1b7e0
+    filename: deeplabv3_seg_v4.ckpt
+    path: checkpoints/hest
+  trident_revision: adf3b7e8fdd7c815f33bec79da0d8d265200c2d6
+  trident_path: external/TRIDENT
+  trident_python: envs/trident/bin/python
+  segmenter: hest
+  segmentation_threshold: 0.5
+  level0_patch_size: 4096
+  overlap: 0
+  min_tissue_proportion: 0.0
+  remove_holes: false
+  bcnb_assumed_mpp: 0.5
+  image_format: png
+runtime:
+  image_batch_size: 32
+  workers: 4
+  cpu_threads: 8
+  local_files_only: true
+  processed_root: data/processed
+  manifest_root: data/manifests
+slurm:
+  account: lia-lab-members
+  shards: 16
+  max_concurrent_gpus: 32
+  cpus_per_task: 8
+  memory_gb: 64
+  walltime_factor: 1.5
+  walltime_overhead_minutes: 15
+  gpu_memory_headroom: 1.2

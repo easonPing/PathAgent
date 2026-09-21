@@ -1,0 +1,9 @@
+name: bcnb
+annotations: data/raw/bcnb/SlideBench-VQA-BCNB.csv
+image_root: data/raw/bcnb/images
+annotation_revision: c8128b91b9bcb38b395961633232dba4dfca81f2
+annotation_sha256: 10b83c6177bd13bee9471fb0bd54b7d500e7eccdb7e52b462424ed50cb259e0b
+expected_questions: 7274
+expected_images: 1058
+input_kind: wsi
+assumed_mpp: 0.5

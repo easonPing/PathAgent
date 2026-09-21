@@ -1,0 +1,6 @@
+name: wsi_vqa
+annotations: data/raw/wsi_vqa/WsiVQA_test.json
+image_root: data/raw/wsi_vqa/slides
+slide_map: data/raw/wsi_vqa/slide_map.json
+input_kind: wsi
+full_run_enabled: false

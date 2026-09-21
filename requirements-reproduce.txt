@@ -1,0 +1,11 @@
+# Install under the existing pathagent Python 3.9 environment.
+--extra-index-url https://download.pytorch.org/whl/cu128
+-r requirements.txt
+torch==2.7.0+cu128
+torchvision==0.22.0+cu128
+openslide-python==1.4.2
+h5py==3.14.0
+pycocoevalcap==1.2
+gdown==5.2.2
+pytest==8.4.2
+huggingface-hub==0.36.2

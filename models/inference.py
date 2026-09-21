@@ -1,496 +1,247 @@
-import os
-import re
+"""Frozen model backend; explicit generation settings and strict response schemas."""
 import json
-import torch
-
+import time
 from copy import deepcopy
-from qwen_vl_utils import process_vision_info
-from data_processing.utils import extract_coords_from_name, build_descriptions_with_meta
+from data_processing.common import resolve, sample_seed, seed_everything
+from data_processing.datasets import answer_label
+from data_processing.regions import ImageSource, Region
+from models.agent import unit_rows
 
-def _call_llm_return_json_simple(model, tokenizer, messages, max_new_tokens=256, retries=1):
-    """
-    Call the qwen LLM and parse JSON.
-    """
-    text = tokenizer.apply_chat_template(
-        messages,
-        tokenize=False,
-        add_generation_prompt=True,
-        enable_thinking=False
-    )
+GENERIC_PROMPT = 'Please describe the pathology features in this image.'
+QUESTION_PROMPT = 'Please describe the pathology features related to the question: {question} in this image.'
 
-    def extract_json_block(s: str):
-        """Extract the first complete { ... } block from the generated text (based on brace counting)."""
-        start = s.find("{")
-        if start == -1:
-            return None
-        depth = 0
-        for i in range(start, len(s)):
-            if s[i] == "{":
-                depth += 1
-            elif s[i] == "}":
-                depth -= 1
-                if depth == 0:
-                    return s[start:i + 1]
-        return None
+class ModelProtocolError(RuntimeError):
+    pass
 
-    for attempt in range(retries + 1):
-        with torch.no_grad():
-            model_inputs = tokenizer([text], return_tensors="pt").to(model.device)
-            generated_ids = model.generate(
-                **model_inputs,
-                max_new_tokens=max_new_tokens
-            )
+def parse_json_object(text):
+    decoder = json.JSONDecoder()
+    for i, char in enumerate(text):
+        if char == '{':
+            try:
+                value, _ = decoder.raw_decode(text[i:])
+                if isinstance(value, dict):
+                    return value
+            except json.JSONDecodeError:
+                pass
+    return None
 
-        output_ids = generated_ids[0][len(model_inputs.input_ids[0]):].tolist()
-        full_output = tokenizer.decode(output_ids, skip_special_tokens=True).strip()
+def choices_text(choices):
+    return '\nChoices:\n' + '\n'.join(f'{k}. {v}' for k, v in choices.items()) if choices else ''
 
-        # Attempt to parse directly
+class ModelBackend:
+    def __init__(self, config):
+        import torch
+        from transformers import (AutoModelForCausalLM, AutoTokenizer, AutoProcessor,
+                                  Qwen2_5_VLForConditionalGeneration, CLIPModel, CLIPProcessor)
+        if not torch.cuda.is_available():
+            raise RuntimeError('Real inference requires an allocated GPU; no CPU fallback')
+        self.config, self.records = config, []
+        self.case_id, self.stage_counts = 'initialization', {}
+        self._source = None
+        torch.set_num_threads(config['runtime']['cpu_threads'])
+        local = config['runtime']['local_files_only']
+        executor = str(resolve(config['models']['executor']['path']))
+        perceptor = str(resolve(config['models']['perceptor']['path']))
+        navigator = str(resolve(config['models']['navigator']['path']))
+        started = time.monotonic()
+        self.tokenizer = AutoTokenizer.from_pretrained(executor, local_files_only=local)
+        self.executor = AutoModelForCausalLM.from_pretrained(
+            executor, local_files_only=local, torch_dtype=torch.bfloat16, device_map='cuda:0').eval()
+        self.processor = AutoProcessor.from_pretrained(perceptor, local_files_only=local)
+        self.perceptor = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+            perceptor, local_files_only=local, torch_dtype=torch.bfloat16, device_map='cuda:0').eval()
+        self.clip_processor = CLIPProcessor.from_pretrained(navigator, local_files_only=local)
+        self.navigator = CLIPModel.from_pretrained(navigator, local_files_only=local).to('cuda:0').eval()
+        if self.executor.config.model_type != 'qwen3' or self.perceptor.config.model_type != 'qwen2_5_vl':
+            raise ValueError('Unexpected model architectures')
+        self.load_seconds = time.monotonic() - started
+        self.generation = config['generation']
+        self.context_limit = int(self.executor.config.max_position_embeddings)
+        self.resolved_generation = {
+            'executor': self.executor.generation_config.to_dict(),
+            'perceptor': self.perceptor.generation_config.to_dict(),
+            'overrides': self.generation, 'image_processor': self.processor.image_processor.to_dict(),
+            'gpu': torch.cuda.get_device_name(0),
+            'gpu_memory_bytes': torch.cuda.get_device_properties(0).total_memory,
+            'context_limit': self.context_limit,
+        }
+
+    def set_case(self, case_id):
+        self.case_id, self.stage_counts = case_id, {}
+
+    def _seed(self, stage):
+        index = self.stage_counts.get(stage, 0)
+        self.stage_counts[stage] = index + 1
+        seed = sample_seed(self.config['seed'], self.case_id, f'{stage}:{index}')
+        seed_everything(seed)
+        return seed
+
+    def source(self, region):
+        if self._source is None or self._source.path != str(resolve(region.image_path)):
+            if self._source is not None:
+                self._source.close()
+            self._source = ImageSource(region.image_path, region.mpp)
+        return self._source
+
+    def close(self):
+        if self._source is not None:
+            self._source.close()
+            self._source = None
+
+    def encode_text(self, text):
+        import torch
+        inputs = self.clip_processor(text=[text], return_tensors='pt', max_length=77,
+                                     padding='max_length', truncation=True).to('cuda:0')
+        with torch.inference_mode():
+            features = self.navigator.get_text_features(**inputs).float().cpu().numpy()
+        return unit_rows(features)
+
+    def encode_images(self, images):
+        import torch
+        import numpy as np
+        outputs = []
+        batch_size = self.config['runtime']['image_batch_size']
+        for start in range(0, len(images), batch_size):
+            inputs = self.clip_processor(images=images[start:start + batch_size], return_tensors='pt').to('cuda:0')
+            with torch.inference_mode():
+                outputs.append(self.navigator.get_image_features(**inputs).float().cpu().numpy())
+        return unit_rows(np.concatenate(outputs))
+
+    def encode_regions(self, regions):
+        import numpy as np
+        output = []
+        batch_size = self.config['runtime']['image_batch_size']
+        for start in range(0, len(regions), batch_size):
+            images = []
+            for region in regions[start:start + batch_size]:
+                images.append(self.source(region).read(region))
+            output.append(self.encode_images(images))
+            for image in images:
+                image.close()
+        return np.concatenate(output)
+
+    def describe(self, region, question=None, missing_info=None):
+        image = self.source(region).read(region)
         try:
-            parsed = json.loads(full_output)
-            return full_output, parsed
-        except Exception:
-            # Attempt to extract the first JSON block
-            json_block = extract_json_block(full_output)
-            if json_block:
-                try:
-                    parsed = json.loads(json_block)
-                    return full_output, parsed
-                except Exception:
-                    pass
+            return self.describe_image(image, region.metadata(), question, missing_info)
+        finally:
+            image.close()
 
-        # If failed, add a reminder prompt and try again
-        if attempt < retries:
-            messages_retry = deepcopy(messages)
-            messages_retry.append({
-                "role": "system",
-                "content": "Reminder: Respond with only a single valid JSON object containing the requested keys."
-            })
-            text = tokenizer.apply_chat_template(
-                messages_retry,
-                tokenize=False,
-                add_generation_prompt=True,
-                enable_thinking=False
-            )
-            continue
-
-        return full_output, None
-
-    return None, None
-
-def evaluate_with_llm_chain(model, tokenizer, description, question, choices=None,
-                               max_new_tokens_a=512, max_new_tokens_b=256, max_new_tokens_c=256,
-                               retries=1):
-    """
-    Three-step logic chain (simplified):
-      Step A: Generate answer + thinking_steps
-      Step B: Judge if sufficient (Yes / No)
-      Step C: If insufficient, analyze missing info and zoom strategy
-    """
-    # --- Step A ---
-    system_a = (
-        "You are an expert AI pathology assistant.\n"
-        "Task: Based on the patch descriptions, try to answer the question step-by-step.\n"
-        "Output ONLY a JSON object:\n"
-        "{\n"
-        '  "answer": "the final predicted answer (string)",\n'
-        '  "thinking_steps": "your detailed reasoning, step-by-step (string)"\n'
-        "}"
-    )
-
-    choices_text = f"\nChoices: {choices}" if choices else ""
-    user_a = f"--- Patch Descriptions ---\n{description}\n--- End ---\nQuestion: {question}{choices_text}\nNow output the JSON with 'answer' and 'thinking_steps'."
-
-    messages_a = [
-        {"role": "system", "content": system_a},
-        {"role": "user", "content": user_a},
-    ]
-    full_a, parsed_a = _call_llm_return_json_simple(model, tokenizer, messages_a,
-                                                   max_new_tokens=max_new_tokens_a, retries=retries)
-
-    if parsed_a is None:
-        parsed_a = {
-            "answer": "Uncertain",
-            "thinking_steps": full_a or ""
-        }
-
-    parsed_a.setdefault("answer", "Uncertain")
-    parsed_a.setdefault("thinking_steps", "")
-
-    # --- Step B ---
-    system_b = (
-        "You are an expert AI pathology assistant.\n"
-        "Task: Judge whether the current patch descriptions are sufficient to confidently support the answer.\n"
-        "Output ONLY a JSON object like:\n"
-        '{"sufficient": "Yes" or "No" }'
-    )
-    user_b = (
-        f"Descriptions:\n{description}\n\n"
-        f"Question: {question}{choices_text}\n\n"
-        f"Previous answer and reasoning:\n{json.dumps(parsed_a, ensure_ascii=False)}\n\n"
-        "Return JSON only."
-    )
-    messages_b = [{"role": "system", "content": system_b}, {"role": "user", "content": user_b}]
-    full_b, parsed_b = _call_llm_return_json_simple(model, tokenizer, messages_b,
-                                                   max_new_tokens=max_new_tokens_b, retries=retries)
-
-    if parsed_b is None:
-        parsed_b = {"sufficient": "Uncertain"}
-
-    suff = parsed_b.get("sufficient", "").strip().lower()
-
-    # --- If sufficient == "yes", return immediately ---
-    if suff == "yes":
-        return {
-            "answer": parsed_a.get("answer"),
-            "thinking_steps": parsed_a.get("thinking_steps"),
-            "sufficient": parsed_b.get("sufficient", ""),
-            "raw_texts": {
-                "step_a_raw": full_a,
-                "step_b_raw": full_b,
-                "step_c_raw": None
-            }
-        }
-
-    # --- Step C ---
-    system_c = (
-        "You are an expert AI pathology assistant.\n"
-        "Task: If current data is insufficient, specify what visual evidence is missing, "
-        "and whether zooming in could help obtain that evidence.\n"
-        "Output ONLY a JSON object like:\n"
-        "{\n"
-        '  "missing_info": "short noun phrase",\n'
-        '  "zoom_recommendation": "Yes" or "No",\n'
-        '  "recommended_zoom_level": "None" or an integer like 10 or 20 or 40,\n'
-        '  "zoom_reason": "brief reason why zooming helps"\n'
-        "}"
-    )
-
-    user_c = (
-        f"Descriptions:\n{description}\n\n"
-        f"Question: {question}{choices_text}\n\n"
-        f"Previous answer: {json.dumps(parsed_a, ensure_ascii=False)}\n"
-        f"Sufficiency judgement: {json.dumps(parsed_b, ensure_ascii=False)}\n\n"
-        "Now provide the JSON for missing info and zoom recommendation."
-    )
-    messages_c = [{"role": "system", "content": system_c}, {"role": "user", "content": user_c}]
-    full_c, parsed_c = _call_llm_return_json_simple(model, tokenizer, messages_c,
-                                                   max_new_tokens=max_new_tokens_c, retries=retries)
-
-    if parsed_c is None:
-        parsed_c = {
-            "missing_info": "Uncertain",
-            "zoom_recommendation": "Uncertain",
-            "recommended_zoom_level": "Uncertain",
-            "zoom_reason": full_c or ""
-        }
-
-    return {
-        "answer": parsed_a.get("answer"),
-        "thinking_steps": parsed_a.get("thinking_steps"),
-        "sufficient": parsed_b.get("sufficient"),
-        "missing_info": parsed_c.get("missing_info"),
-        "zoom_recommendation": parsed_c.get("zoom_recommendation"),
-        "zoom_level": parsed_c.get("recommended_zoom_level", 5),
-        "zoom_reason": parsed_c.get("zoom_reason"),
-        "raw_texts": {
-            "step_a_raw": full_a,
-            "step_b_raw": full_b,
-            "step_c_raw": full_c
-        }
-    }
-
-def slide_llm_answer(
-    model,
-    tokenizer,
-    descriptions_text,
-    question,
-    choices=None,
-    magnification=None,
-    case_name=None,
-):
-    """
-    Slide-level LLM: Generates the final answer based on multiple patch descriptions.
-    Optimized the prompt to focus the model on specific slide-level results rather than conceptual explanations.
-    Automatically repairs JSON format errors in the model output.
-    """
-    system_prompt = (
-        "You are an expert slide-level pathology assistant. "
-        "You will be given a question and detailed patch-level descriptions of a pathology slide. "
-        "Your task is to infer the specific **slide-level diagnostic result or quantitative value** "
-        "based on the provided evidence — not to define or explain the medical term itself. "
-        "The answer should directly reflect the information observable in the slide, such as biomarker expression level, "
-        "presence or absence of features, or a numeric measurement.\n\n"
-        "Rules:\n"
-        "1. When the question asks about a biomarker (e.g., HER2, progesterone receptor, Ki-67), "
-        "output the **observed status or score** (e.g., 'positive', 'negative', '2+', 'high expression'), not the definition.\n"
-        "2. When the question asks about survival time or other quantitative results, "
-        "output only the numerical value for the answer key in the response JSON.\n"
-        "3. Always keep the 'answer' short — short phrase, or one number.\n"
-        "4. Always include a brief reasoning in 'explanation', summarizing how the evidence supports the answer.\n"
-        "5. **If choices are provided, your 'answer' must be exactly one of the given options. "
-        "Never generate an answer outside the provided choices.**\n\n"
-        "Respond strictly in JSON format with keys: 'answer' and 'explanation'."
-    )
-
-    if magnification is not None:
-        system_prompt = f"[Slide-level Context | Magnification={magnification}x]\n" + system_prompt
-
-    choices_text = f"\nChoices: {choices}" if choices else ""
-
-    user_prompt = (
-        f"Question: {question}{choices_text}\n\n"
-        "Now, based on the following patch-level descriptions of the slide, "
-        "determine the **slide-level result** that directly answers the question.\n\n"
-        f"--- Patch Descriptions ---\n{descriptions_text}\n--- End of Descriptions ---\n\n"
-        "Answer in JSON format:"
-    )
-
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_prompt},
-    ]
-
-    text = tokenizer.apply_chat_template(
-        messages,
-        tokenize=False,
-        add_generation_prompt=True,
-        enable_thinking=False
-    )
-
-    with torch.no_grad():
-        model_inputs = tokenizer([text], return_tensors="pt").to(model.device)
-        generated_ids = model.generate(
-            **model_inputs,
-            max_new_tokens=1024,
-            temperature=0.15,
-            do_sample=False
-        )
-
-    output_ids = generated_ids[0][len(model_inputs.input_ids[0]):].tolist()
-    raw_answer = tokenizer.decode(output_ids, skip_special_tokens=True).strip()
-
-    # ------------------- JSON Extraction and Repair Logic -------------------
-    parsed = None
-    json_candidates = re.findall(r"\{.*?\}", raw_answer, flags=re.DOTALL)
-
-    for candidate in reversed(json_candidates):  # Parse the last one first
-        try:
-            parsed = json.loads(candidate)
-            break
-        except Exception:
-            continue
-
-    if parsed is None:
-        print(f"JSON parsing failed ({case_name if case_name else 'unknown_case'}), raw output:\n{raw_answer}\n")
-
-        # fallback: Extract the first word as the answer
-        answer = {
-            "answer": raw_answer.split()[0] if raw_answer else "Unknown",
-            "explanation": "Model did not return valid JSON."
-        }
-    else:
-        answer_text = parsed.get("answer", "").strip()
-        if not answer_text:
-            answer_text = "Unknown"
-
-        explanation_text = parsed.get("explanation", "").strip()
-        if not explanation_text:
-            explanation_text = "No explanation provided."
-
-        answer = {
-            "answer": answer_text,
-            "explanation": explanation_text
-        }
-
-    del model_inputs, generated_ids, output_ids
-    torch.cuda.empty_cache()
-
-    return answer
-
-def patho_r1_describe(image, question=None, 
-                    patho_r1_processor=None, patho_r1_model=None,
-                    coords=None, magnification=None, max_new_tokens=1024, choices=None, missing_info=None):
-
-    meta_lines = []
-    if coords is not None:
-        meta_lines.append(f"Patch coordinates: ({coords[0]},{coords[1]})")
-    if magnification is not None:
-        meta_lines.append(f"Magnification: {magnification}x")
-    meta_text = ""
-    if meta_lines:
-        meta_text = "[IMAGE META] " + " | ".join(meta_lines) + "\n\n"
-
-
-    if question is None:
-        prompt_body = "Please describe the pathology features in this image."
-    else:
-        prompt_body = (
-            f"Question: {question}\n\n"
-            "Answer the question and list the pathological features visible in the image that support your answer."
-        )
-
-    if choices is not None:
-        prompt_body += f"\nChoices: {choices}"
-    if missing_info is not None:
-        prompt_body += f"\nMissing information: {missing_info}"
-
-    full_text = meta_text + prompt_body
-
-    # === Construct system prompt ===
-    system_prompt = (
-        "A conversation between a curious user and an AI medical assistant specialized in pathology image analysis. "
-        "The assistant can interpret pathology images, describe observed features, and provide possible explanations based on medical knowledge, "
-        "but will never give a definitive diagnosis or prescribe treatment. "
-        "The assistant must always maintain a polite, clear, and professional tone. "
-        "All answers should be supported by established, reliable medical sources. "
-        "The assistant should carefully consider visual details in pathology images, such as cell morphology, staining patterns, and tissue architecture. "
-        "If choices are given, the answer must be given from the choices."
-        "If Missing information is given, you need to focus on this part of the image."
-    )
-
-    # === Construct message input ===
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {
-            "role": "user",
-            "content": [
-                {"type": "image", "image": image},
-                {"type": "text", "text": full_text},
-            ],
-        },
-    ]
-
-    # === Construct model input ===
-    text = patho_r1_processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-    image_inputs, video_inputs = process_vision_info(messages)
-
-    inputs = patho_r1_processor(
-        text=[text],
-        images=image_inputs,
-        # videos=video_inputs,
-        padding=True,
-        return_tensors="pt",
-    ).to(patho_r1_model.device)
-
-    # === Inference generation ===
-    with torch.no_grad():
-        generated_ids = patho_r1_model.generate(
-            **inputs,
-            max_new_tokens=max_new_tokens,
-        )
-
-    generated_ids_trimmed = [
-        out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
-    ]
-
-    output_text = patho_r1_processor.batch_decode(
-        generated_ids_trimmed,
-        skip_special_tokens=True,
-        clean_up_tokenization_spaces=False
-    )[0].strip()
-
-    return output_text
-
-def summarize_patches_in_chunks(
-    model, tokenizer, descriptions_dict, patch_names,
-    question_text=None, chunk_size=5, threshold=50, magnification=None
-):
-    """
-    If the number of patches exceeds the threshold, summarize descriptions in chunks of `chunk_size`.
-    The summary for each chunk will explicitly list the included patch coordinates and conduct a guided summary based on the question.
-    """
-    if len(patch_names) <= threshold:
-        # Does not exceed threshold, concatenate original descriptions directly
-        items = [(name, descriptions_dict[name]) for name in patch_names]
-        return build_descriptions_with_meta(
-            items, mag_level=magnification, include_header=True, include_coords=True
-        )
-
-    print(f"Patch count {len(patch_names)} exceeds {threshold}, performing chunked summarization...")
-    summaries = []
-    for i in range(0, len(patch_names), chunk_size):
-        chunk_names = patch_names[i:i+chunk_size]
-        items = [(name, descriptions_dict[name]) for name in chunk_names]
-
-        # Extract coordinate list
-        coords_list = []
-        for name, _ in items:
-            x, y = extract_coords_from_name(name)
-            coords_list.append(f"({x},{y})" if x is not None and y is not None else "(unknown)")
-        coords_str = ", ".join(coords_list)
-
-        # Concatenate patch descriptions (with coordinates)
-        chunk_text = build_descriptions_with_meta(
-            items, mag_level=magnification, include_header=False, include_coords=True
-        )
-
-        # === Construct Prompt ===
-        system_prompt = (
-            "You are an expert pathology assistant. "
-            "You will be given multiple patch-level descriptions of histopathology images. "
-            "Your task is to summarize the key pathological features across these patches. "
-            "The summary must be concise yet informative, highlighting significant morphological patterns. "
-            "Additionally, focus on information that could help answer the following question "
-            "about the slide, emphasizing details relevant to the diagnostic or interpretive context."
-        )
-
-        if magnification is not None:
-            system_prompt = f"[Patch-level Summarization | Magnification={magnification}x]\n" + system_prompt
-
-        user_prompt = (
-            f"--- Patch Descriptions (with coordinates) ---\n{chunk_text}\n"
-            "--- End of Descriptions ---\n\n"
-        )
-
-        if question_text:
-            user_prompt += f"Related Question: {question_text}\n\n"
-
-        user_prompt += (
-            "Summarize the main pathological findings across these patches. "
-            "Your summary should:\n"
-            "- Capture key morphological features and cellular details.\n"
-            "- If a question is provided, emphasize features that are relevant to answering it.\n"
-            "- Do not provide a final answer or diagnosis.\n"
-            "Output only the summary text, no JSON or extra formatting."
-        )
-
+    def describe_image(self, image, metadata='', question=None, missing_info=None):
+        import torch
+        from qwen_vl_utils import process_vision_info
+        prompt = GENERIC_PROMPT if question is None else QUESTION_PROMPT.format(question=question)
+        if missing_info:
+            prompt += f'\nMissing visual information to inspect: {missing_info}'
         messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ]
+            {'role': 'system', 'content': 'You are an AI assistant specialized in describing visible pathology features.'},
+            {'role': 'user', 'content': [{'type': 'image', 'image': image},
+                                         {'type': 'text', 'text': metadata + '\n' + prompt}]}]
+        text = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        image_inputs, _ = process_vision_info(messages)
+        inputs = self.processor(text=[text], images=image_inputs, return_tensors='pt', padding=True).to('cuda:0')
+        tokens = self.generation['generic_description_tokens' if question is None else 'question_description_tokens']
+        seed = self._seed('describe:' + metadata + str(question) + str(missing_info))
+        started = time.monotonic()
+        with torch.inference_mode():
+            generated = self.perceptor.generate(**inputs, max_new_tokens=tokens)
+        output = self.processor.decode(generated[0, inputs.input_ids.shape[1]:], skip_special_tokens=True).strip()
+        self.records.append({'stage': 'describe', 'seconds': time.monotonic() - started,
+                             'input_tokens': inputs.input_ids.shape[1], 'output_tokens': generated.shape[1] - inputs.input_ids.shape[1],
+                             'seed': seed, 'prompt': prompt, 'region_metadata': metadata, 'raw_response': output})
+        if not output:
+            raise ModelProtocolError('Perceptor returned an empty description')
+        return output
 
-        text = tokenizer.apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=True,
-            enable_thinking=False
-        )
+    def _text(self, messages, tokens, stage, greedy=False):
+        import torch
+        text = self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True,
+                                                  enable_thinking=self.generation['enable_thinking'])
+        inputs = self.tokenizer([text], return_tensors='pt').to('cuda:0')
+        if inputs.input_ids.shape[1] + tokens > self.context_limit:
+            raise ModelProtocolError(f'Context overflow at {stage}: {inputs.input_ids.shape[1]} + {tokens}')
+        kwargs = {'max_new_tokens': tokens}
+        if greedy:
+            kwargs.update(do_sample=False, temperature=None, top_p=None, top_k=None)
+        started = time.monotonic()
+        seed = self._seed(stage)
+        with torch.inference_mode():
+            generated = self.executor.generate(**inputs, **kwargs)
+        output = self.tokenizer.decode(generated[0, inputs.input_ids.shape[1]:], skip_special_tokens=True).strip()
+        self.records.append({'stage': stage, 'seconds': time.monotonic() - started,
+                             'input_tokens': inputs.input_ids.shape[1], 'output_tokens': generated.shape[1] - inputs.input_ids.shape[1],
+                             'raw_response': output, 'seed': seed, 'messages': messages})
+        return output
 
-        with torch.no_grad():
-            model_inputs = tokenizer([text], return_tensors="pt").to(model.device)
-            generated_ids = model.generate(
-                **model_inputs,
-                max_new_tokens=512,
-                temperature=0.2,
-                do_sample=False
-            )
+    def _json(self, system, prompt, tokens, stage, keys, greedy=False, validator=None):
+        messages = [{'role': 'system', 'content': system}, {'role': 'user', 'content': prompt}]
+        for attempt in range(self.generation['retries'] + 1):
+            raw = self._text(messages, tokens, stage, greedy)
+            parsed = parse_json_object(raw)
+            valid = parsed is not None and all(k in parsed for k in keys)
+            if valid and (validator is None or validator(parsed)):
+                return parsed
+            messages = deepcopy(messages[:2])
+            messages.append({'role': 'user', 'content': 'Return one valid JSON object with the required keys and valid field values only.'})
+        raise ModelProtocolError(f'Invalid {stage} response after {attempt + 1} attempts')
 
-        output_ids = generated_ids[0][len(model_inputs.input_ids[0]):].tolist()
-        summary_text = tokenizer.decode(output_ids, skip_special_tokens=True).strip()
+    def evidence_text(self, findings, question, extra=''):
+        chunks = [Region(**f['region']).metadata() + '\n' + f['description'] for f in findings]
+        algorithm = self.config['algorithm']
+        budget = self.context_limit - self.generation['final_tokens'] - len(self.tokenizer.encode(extra + question)) - 2048
+        if budget < 1024:
+            raise ModelProtocolError('Reasoning history alone exceeds context')
+        for level in range(5):
+            text = '\n\n'.join(chunks)
+            if len(self.tokenizer.encode(text)) <= budget and (level > 0 or len(chunks) <= algorithm['summary_threshold']):
+                return text
+            previous_tokens = len(self.tokenizer.encode(text))
+            summarized = []
+            for start in range(0, len(chunks), algorithm['summary_chunk_size']):
+                group = chunks[start:start + algorithm['summary_chunk_size']]
+                summary = self._text([
+                    {'role': 'system', 'content': "Summarize visible pathological findings, preserving region coordinates and each region's scale. Do not give a final answer or diagnosis."},
+                    {'role': 'user', 'content': f'Question: {question}\n' + '\n\n'.join(group)}],
+                    self.generation['summary_tokens'], 'summary', greedy=True)
+                summarized.append(summary)
+            chunks = summarized
+            if len(self.tokenizer.encode('\n\n'.join(chunks))) >= previous_tokens:
+                raise ModelProtocolError('Summary did not reduce overlong evidence')
+        raise ModelProtocolError('Unable to fit evidence without dropping observations')
 
-        # Release memory
-        del model_inputs, generated_ids, output_ids
-        torch.cuda.empty_cache()
+    def evaluate(self, findings, sample, scale_kind, allowed_scales):
+        description = self.evidence_text(findings, sample['question'])
+        context = f"Descriptions:\n{description}\nQuestion: {sample['question']}{choices_text(sample['choices'])}"
+        a = self._json(
+            'You are an expert AI pathology assistant. Based on the patch descriptions, try to answer the question step-by-step. Output ONLY JSON: {"answer": "predicted answer", "thinking_steps": "reasoning"}.',
+            context, self.generation['step_a_tokens'], 'predict', ['answer', 'thinking_steps'],
+            validator=lambda x: isinstance(x['answer'], str) and isinstance(x['thinking_steps'], str))
+        b = self._json(
+            'Judge whether the current patch descriptions are sufficient to confidently support the answer. Output ONLY JSON: {"sufficient": "Yes" or "No"}.',
+            context + '\nPrevious answer and reasoning:\n' + json.dumps(a),
+            self.generation['step_b_tokens'], 'reflect', ['sufficient'],
+            validator=lambda x: str(x['sufficient']).lower() in {'yes', 'no'})
+        if b['sufficient'].lower() == 'yes':
+            return {**a, **b}
+        scale_description = 'absolute magnification' if scale_kind == 'physical' else 'relative crop factor; physical magnification is unknown'
+        c = self._json(
+            'Specify missing visual evidence and whether zooming helps. Output ONLY JSON with keys missing_info (short noun phrase), zoom_recommendation (Yes or No), zoom_level (number or null), zoom_reason (string).',
+            context + '\nPrevious answer and reflection:\n' + json.dumps({**a, **b}) +
+            f'\nScale means {scale_description}. Available zoom levels: {allowed_scales}.',
+            self.generation['step_c_tokens'], 'missing_info',
+            ['missing_info', 'zoom_recommendation', 'zoom_level', 'zoom_reason'],
+            validator=lambda x: isinstance(x['missing_info'], str) and bool(x['missing_info'].strip())
+            and str(x['zoom_recommendation']).lower() in {'yes', 'no'}
+            and (str(x['zoom_recommendation']).lower() == 'no' or x['zoom_level'] in allowed_scales))
+        return {**a, **b, **c}
 
-        summaries.append(
-            f"[Chunk {i//chunk_size+1} | Patches={coords_str}]\n{summary_text}"
-        )
-
-        print(f"Completed summary for chunk {i//chunk_size+1} (patch count: {len(chunk_names)})")
-
-    # Concatenate summaries of all chunks
-    combined_summary = (
-        f"[Current Magnification: {magnification}x]\n\n" +
-        "\n\n".join(summaries)
-    )
-    return combined_summary
+    def conclude(self, findings, trajectory, sample):
+        history = json.dumps([{k: e[k] for k in ('iteration', 'action', 'decision')} for e in trajectory], ensure_ascii=False)
+        description = self.evidence_text(findings, sample['question'], history)
+        prompt = (f"Question: {sample['question']}{choices_text(sample['choices'])}\n"
+                  f'Accumulated region evidence:\n{description}\nPrior inferences and actions:\n{history}')
+        return self._json(
+            'You are an expert slide-level pathology assistant. Integrate all visual evidence and prior inferences to answer the specific question. Keep answer short. If choices are given, return exactly one option text or its label. Output ONLY JSON with answer and explanation (both strings).',
+            prompt, self.generation['final_tokens'], 'final', ['answer', 'explanation'], greedy=True,
+            validator=lambda x: isinstance(x['answer'], str) and bool(x['answer'].strip())
+            and isinstance(x['explanation'], str) and (not sample['choices'] or answer_label(x['answer'], sample['choices']) is not None))
