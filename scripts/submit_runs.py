@@ -15,7 +15,9 @@ from scripts.run_inference import check_assets
 from scripts.select_gpu import GPU_PRIORS, choose_pair, discover
 
 
-def submit(script, candidate, config, name, array=False):
+def submit(script, candidate, config, name, array=False, shard_count=16, concurrency=16):
+    if array and (shard_count not in {16, 128} or not 1 <= concurrency <= min(shard_count, 32)):
+        raise ValueError('Invalid shard count or GPU concurrency')
     command = ['sbatch', '--parsable', '--account=' + config['slurm']['account'], '--partition=gpu',
                '--gres=gpu:' + candidate['gres'] + ':1', '--constraint=' + candidate['feature'],
                '--cpus-per-task=' + str(config['slurm']['cpus_per_task']),
@@ -23,7 +25,7 @@ def submit(script, candidate, config, name, array=False):
                '--time=' + str(candidate['walltime_minutes']), '--job-name=' + name,
                '--output=' + str(script.parent / (name + '-%A_%a.log'))]
     if array:
-        command.append('--array=0-15%16')
+        command.append(f'--array=0-{shard_count - 1}%{concurrency}')
     result = subprocess.run(command + [str(script)], check=True, capture_output=True, text=True)
     job_id = result.stdout.strip().split(';')[0]
     if not job_id.isdigit():

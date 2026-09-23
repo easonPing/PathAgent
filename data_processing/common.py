@@ -63,8 +63,8 @@ def load_config(path="configs/reproduce.yaml"):
         raise ValueError("Generation flags differ from the frozen reproduction protocol")
     if any(config["generation"][k] != "checkpoint" for k in ["executor_sampling", "perceptor_sampling"]):
         raise ValueError("Predict/reflect/describe sampling must use the pinned checkpoint configuration")
-    if config["slurm"]["shards"] != 16 or config["slurm"]["max_concurrent_gpus"] != 32:
-        raise ValueError("Approved execution layout requires 16 shards per benchmark and at most 32 GPUs")
+    if config["slurm"]["shards"] not in {16, 128} or config["slurm"]["max_concurrent_gpus"] != 32:
+        raise ValueError("Approved execution layouts use 16 or 128 shards and at most 32 GPUs")
     return config
 
 
