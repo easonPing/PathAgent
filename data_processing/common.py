@@ -5,6 +5,7 @@ import os
 import random
 import tempfile
 from pathlib import Path
+from models.protocols import PAPER_PROTOCOL, CONTEXT_PROTOCOL, protocol_name, protocol_manifest
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -48,12 +49,13 @@ def atomic_json(path, value):
             os.unlink(tmp)
 
 
-def load_config(path="configs/reproduce.yaml"):
+def load_config(path="configs/reproduce_v1.yaml"):
     import yaml
     with open(resolve(path), encoding="utf-8") as f:
         config = yaml.safe_load(f)
     if config.get("schema_version") != 1:
         raise ValueError("Unsupported reproduction config schema")
+    protocol = protocol_name(config)
     required = {"max_iterations": 5, "initial_ratio": .10, "replenish_ratio": .05,
                 "question_description_topk": 5, "initial_magnification": 5,
                 "zoom_query": "missing_info", "zoom_selected_children": 1}
@@ -65,7 +67,26 @@ def load_config(path="configs/reproduce.yaml"):
         raise ValueError("Predict/reflect/describe sampling must use the pinned checkpoint configuration")
     if config["slurm"]["shards"] not in {16, 128} or config["slurm"]["max_concurrent_gpus"] != 32:
         raise ValueError("Approved execution layouts use 16 or 128 shards and at most 32 GPUs")
+    if protocol in (PAPER_PROTOCOL, CONTEXT_PROTOCOL):
+        caps = {'step_a_tokens': 1024, 'step_b_tokens': 512, 'step_c_tokens': 512,
+                'generic_description_tokens': 1024, 'question_description_tokens': 2048,
+                'final_tokens': 2048, 'summary_tokens': 1024}
+        if any(config['generation'].get(k) != v for k, v in caps.items()):
+            raise ValueError('Output budgets differ from the named 2x protocol')
+        if config['generation'].get('retries') != 1:
+            raise ValueError('The paper protocol allows one format retry')
+    expected_dtypes = {'executor': 'bfloat16', 'perceptor': 'bfloat16', 'navigator': 'float32'}
+    for role, dtype in expected_dtypes.items():
+        if config['models'][role]['dtype'] != dtype or config['models'][role].get('quantization'):
+            raise ValueError('Local comparison requires BF16 Executor/Perceptor and FP32 PLIP')
+    if any(device != 'cuda:0' for device in config['runtime'].get('devices', {}).values()):
+        raise ValueError('Local comparison supports one GPU per process (cuda:0)')
     return config
+
+
+def run_identity(config, source_hash, samples_hash):
+    return {'config': config, 'code_hash': source_hash, 'samples_hash': samples_hash,
+            'protocol': protocol_name(config), 'prompt_manifest_hash': digest(protocol_manifest(config))}
 
 
 def code_hash():

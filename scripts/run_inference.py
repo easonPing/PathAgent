@@ -7,11 +7,12 @@ from collections import defaultdict
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from data_processing.common import (atomic_json, code_hash, digest, load_config, read_json,
-                                    read_manifest, resolve, sample_seed, seed_everything)
+                                    read_manifest, resolve, run_identity, sample_seed, seed_everything)
 from data_processing.preprocess import prepare_observations, prepare_regions
 from eval.metrics import score
 from models.agent import run_agent
-from models.inference import ModelBackend, ModelProtocolError
+from models.inference import ModelProtocolError
+from models.protocols import backend_class, protocol_manifest, protocol_name, terminal_status
 
 
 def check_assets(config):
@@ -30,7 +31,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--manifest', required=True)
     parser.add_argument('--output', required=True)
-    parser.add_argument('--config', default='configs/reproduce.yaml')
+    parser.add_argument('--config', default='configs/reproduce_v1.yaml')
     parser.add_argument('--smoke', action='store_true')
     args = parser.parse_args()
     config, manifest = load_config(args.config), read_manifest(args.manifest)
@@ -43,7 +44,7 @@ def main():
     source_hash = code_hash()
     if os.environ.get('PATHAGENT_EXPECT_CODE_HASH', source_hash) != source_hash:
         raise ValueError('Source files changed since job submission')
-    identity = {'config': config, 'code_hash': source_hash, 'samples_hash': manifest['samples_hash']}
+    identity = run_identity(config, source_hash, manifest['samples_hash'])
     run_hash = digest(identity)
     output = resolve(args.output)
     output.mkdir(parents=True, exist_ok=True)
@@ -51,6 +52,7 @@ def main():
     if lock_path.exists() and read_json(lock_path)['run_hash'] != run_hash:
         raise ValueError('Resume refused: code/config/manifest changed; use a new output directory')
     atomic_json(lock_path, {**identity, 'run_hash': run_hash})
+    atomic_json(output / 'prompt_manifest.json', protocol_manifest(config))
     check_assets(config)
     import torch
     if not torch.cuda.is_available() or not torch.cuda.is_bf16_supported():
@@ -80,11 +82,29 @@ def main():
         groups[row['image_id']].append(row)
     # Finish segmentation in subprocesses before resident LLMs consume GPU memory.
     prepared = {}
+    inventory = {}
     for image in sorted(groups):
         prepared[image] = prepare_regions(groups[image][0], config, source_hash)
+        cached = read_json(prepared[image][0] / 'regions.json')
+        inventory[image] = {'observation_cache': str(prepared[image][0]),
+                            'path': groups[image][0]['image_path'], 'sha256': cached['image_sha256'],
+                            'width': cached['width'], 'height': cached['height']}
+        atomic_json(output / 'image_inventory.json', inventory)
     seed_everything(config['seed'])
-    backend = ModelBackend(config)
+    backend = backend_class(config)(config)
+    backend.resolved_generation.update(protocol=protocol_name(config), prompts=protocol_manifest(config))
     atomic_json(output / 'resolved_generation.json', backend.resolved_generation)
+    import importlib.metadata
+    packages = {}
+    for package in ['torch', 'transformers', 'accelerate', 'bitsandbytes', 'qwen-vl-utils']:
+        try:
+            packages[package] = importlib.metadata.version(package)
+        except importlib.metadata.PackageNotFoundError:
+            packages[package] = None
+    atomic_json(output / 'environment.json', {'executable': sys.executable, 'prefix': sys.prefix,
+                'conda_prefix': os.environ.get('CONDA_PREFIX'),
+                'cuda_visible_devices': os.environ.get('CUDA_VISIBLE_DEVICES'),
+                'trident_python': str(resolve(config['preprocessing']['trident_python'])), 'packages': packages})
     results, costs = {}, {}
     for image in sorted(groups):
         image_started = time.monotonic()
@@ -96,7 +116,7 @@ def main():
                 result = read_json(destination)
                 if result.get('run_hash') != run_hash or result.get('sample_id') != row['sample_id']:
                     raise ValueError('Result identity mismatch')
-                if result.get('status') == 'ok':
+                if terminal_status(config, result.get('status')):
                     results[row['sample_id']] = result
                     continue
             backend.records.clear()
@@ -105,9 +125,10 @@ def main():
             try:
                 result = run_agent(row, regions, descriptions, features, backend, config)
             except ModelProtocolError as exc:
-                result = {'status': 'invalid', 'pred_answer': '', 'error': str(exc)}
+                result = {'status': 'invalid', 'pred_answer': '', 'error': str(exc),
+                          'error_stage': backend.records[-1]['stage'] if backend.records else 'unknown'}
             result.update(sample_id=row['sample_id'], image_id=image, run_hash=run_hash,
-                          model_calls=list(backend.records))
+                          protocol=protocol_name(config), model_calls=list(backend.records))
             atomic_json(destination, result)
             results[row['sample_id']] = result
             print(f"{row['sample_id']}: {result['status']}", flush=True)
@@ -115,7 +136,7 @@ def main():
                         'questions': len(groups[image])}
     metrics = score(manifest['samples'], results, open_metrics=manifest['dataset'] == 'wsi_vqa')
     atomic_json(output / 'metrics.json', metrics)
-    profile = {'real_gpu': True, 'gpu': gpu_name, 'gpu_memory_bytes': gpu_memory,
+    profile = {'real_gpu': True, 'protocol': protocol_name(config), 'gpu': gpu_name, 'gpu_memory_bytes': gpu_memory,
                'max_memory_allocated_bytes': torch.cuda.max_memory_allocated(),
                'max_memory_reserved_bytes': torch.cuda.max_memory_reserved(),
                'seconds': time.monotonic() - started, 'model_load_seconds': backend.load_seconds,

@@ -1,5 +1,9 @@
 # PathAgent 论文优先复现
 
+当前支持通过 `--config` 切换旧协议与本机适配的 Paper 协议；两套共用本地 Conda，
+Perceptor 均继承 checkpoint 采样。配置差异、运行命令及恢复规则见
+[PIPELINE_COMPARISON.md](PIPELINE_COMPARISON.md)。下表描述默认旧配置。
+
 本分支实施已批准的方案：PathMMU、SlideBench-VQA (BCNB) 全量推理，WSI-VQA 本轮只做真实 GPU smoke；不训练、不做消融。基线作者提交为 `8c2abee2cd18ca2e2c839742c9296bd8a41738c5`。以下“实际使用”表示当前代码与冻结配置，不表示已经取得论文指标；真实运行状态另见 `IMPLEMENTATION_STATUS.md`。
 
 依据优先级为论文 > 作者代码 > 经验证的第三方复现 > 显式工程默认。论文未公开的细节不能被称为论文超参数。没有找到包含独立修改和可验证实验结果的第三方复现，因此没有用第三方数值填补空白。
@@ -49,7 +53,7 @@
 
 ## 文件与入口
 
-- `configs/reproduce.yaml`：冻结模型、算法、生成与调度参数；`configs/datasets/*.yaml`：数据版本、原图位置与预期覆盖。
+- `configs/reproduce_v1.yaml`：冻结模型、算法、生成与调度参数；`configs/datasets/*.yaml`：数据版本、原图位置与预期覆盖。
 - `data_processing/datasets.py`：三套原始标注的规范化、严格选项解析、阻止 gold 进入推理。
 - `data_processing/regions.py`：OpenSlide/PIL 原图读取、坐标、MPP 来源、物理/相对倍率和 Zoom。
 - `scripts/trident_coords.py`：独立 Trident 环境中的分割和原图坐标生成；`data_processing/preprocess.py`：按内容/配置/源码 hash 的区域、描述和 PLIP 缓存。

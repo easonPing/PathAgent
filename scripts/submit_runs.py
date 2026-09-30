@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from data_processing.common import (ROOT, atomic_json, code_hash, digest, load_config,
-                                    read_json, read_manifest, resolve, write_manifest)
+                                    read_json, read_manifest, resolve, run_identity, write_manifest)
 from data_processing.regions import ImageSource
 from data_processing.sharding import make_shards
 from scripts.run_inference import check_assets
@@ -63,7 +63,7 @@ def verify_smoke(path, dataset, config, source_hash):
     if manifest.get('availability_restricted'):
         raise RuntimeError('Availability-restricted checks do not replace complete-source smoke acceptance')
     lock = read_json(path / 'run_lock.json')
-    expected = digest({'config': config, 'code_hash': source_hash, 'samples_hash': manifest['samples_hash']})
+    expected = digest(run_identity(config, source_hash, manifest['samples_hash']))
     if not (profile.get('passed') and profile.get('real_gpu') and profile.get('smoke')
             and profile.get('dataset') == dataset and profile.get('slurm_job_id')
             and profile['code_hash'] == source_hash and profile['config_hash'] == digest(config)
@@ -103,6 +103,7 @@ def main():
     import yaml
     parser = argparse.ArgumentParser()
     parser.add_argument('mode', choices=['smoke', 'final'])
+    parser.add_argument('--config', default='configs/reproduce_v1.yaml')
     parser.add_argument('--dataset', choices=['pathmmu', 'bcnb', 'wsi_vqa'])
     parser.add_argument('--manifest', help='Explicit smoke manifest, including availability-restricted execution checks')
     parser.add_argument('--smoke-pathmmu')
@@ -111,7 +112,7 @@ def main():
     parser.add_argument('--estimate-seconds', type=float, default=14400,
                         help='Initial smoke runtime prior in A100-80GB seconds; not a measurement')
     args = parser.parse_args()
-    config = load_config()
+    config = load_config(args.config)
     check_assets(config)
     source_hash = code_hash()
     stamp = dt.datetime.now().strftime('%Y%m%d_%H%M%S_%f')

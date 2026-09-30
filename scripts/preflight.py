@@ -13,8 +13,9 @@ def main():
     from huggingface_hub import get_token
     parser = argparse.ArgumentParser()
     parser.add_argument('--output', default='runs/preflight.json')
+    parser.add_argument('--config', default='configs/reproduce_v1.yaml')
     args = parser.parse_args()
-    config = load_config()
+    config = load_config(args.config)
     report = {'code_hash': code_hash(), 'config_hash': digest(config),
               'hf_login_present': bool(get_token()), 'models': {}, 'datasets': {}, 'blockers': [],
               'scope': 'asset readiness only; this check does not perform inference or submit jobs'}

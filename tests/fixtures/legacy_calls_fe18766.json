@@ -1,0 +1,65 @@
+{
+  "source_commit": "fe18766",
+  "calls": [
+    {
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are an expert AI pathology assistant. Based on the patch descriptions, try to answer the question step-by-step. Output ONLY JSON: {\"answer\": \"predicted answer\", \"thinking_steps\": \"reasoning\"}."
+        },
+        {
+          "role": "user",
+          "content": "Descriptions:\nvisible evidence\nQuestion: Which?\nChoices:\nA. yes\nB. no"
+        }
+      ],
+      "tokens": 512,
+      "stage": "predict",
+      "greedy": false
+    },
+    {
+      "messages": [
+        {
+          "role": "system",
+          "content": "Judge whether the current patch descriptions are sufficient to confidently support the answer. Output ONLY JSON: {\"sufficient\": \"Yes\" or \"No\"}."
+        },
+        {
+          "role": "user",
+          "content": "Descriptions:\nvisible evidence\nQuestion: Which?\nChoices:\nA. yes\nB. no\nPrevious answer and reasoning:\n{\"answer\": \"A\", \"thinking_steps\": \"structured reasoning\"}"
+        }
+      ],
+      "tokens": 256,
+      "stage": "reflect",
+      "greedy": false
+    },
+    {
+      "messages": [
+        {
+          "role": "system",
+          "content": "Specify missing visual evidence and whether zooming helps. Output ONLY JSON with keys missing_info (short noun phrase), zoom_recommendation (Yes or No), zoom_level (number or null), zoom_reason (string)."
+        },
+        {
+          "role": "user",
+          "content": "Descriptions:\nvisible evidence\nQuestion: Which?\nChoices:\nA. yes\nB. no\nPrevious answer and reflection:\n{\"answer\": \"A\", \"thinking_steps\": \"structured reasoning\", \"sufficient\": \"No\"}\nScale means absolute magnification. Available zoom levels: [10, 20, 40]."
+        }
+      ],
+      "tokens": 256,
+      "stage": "missing_info",
+      "greedy": false
+    },
+    {
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are an expert slide-level pathology assistant. Integrate all visual evidence and prior inferences to answer the specific question. Keep answer short. If choices are given, return exactly one option text or its label. Output ONLY JSON with answer and explanation (both strings)."
+        },
+        {
+          "role": "user",
+          "content": "Question: Which?\nChoices:\nA. yes\nB. no\nAccumulated region evidence:\nvisible evidence\nPrior inferences and actions:\n[{\"iteration\": 1, \"action\": \"zoom\", \"decision\": {\"answer\": \"A\", \"thinking_steps\": \"structured reasoning\", \"sufficient\": \"No\", \"missing_info\": \"mitoses\", \"zoom_recommendation\": \"Yes\", \"zoom_level\": 40, \"recommended_zoom_level\": 40, \"zoom_reason\": \"detail\"}}]"
+        }
+      ],
+      "tokens": 1024,
+      "stage": "final",
+      "greedy": true
+    }
+  ]
+}

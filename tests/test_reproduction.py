@@ -45,11 +45,12 @@ def inputs(n):
     return regions, {r.region_id: 'generic' for r in regions}, {r.region_id: [1., 0.] for r in regions}
 
 
-def test_ceil_full_denominator_unique_and_all_evidence():
+@pytest.mark.parametrize('config_path', ['configs/reproduce_v1.yaml', 'configs/reproduce_v2.yaml'])
+def test_ceil_full_denominator_unique_and_all_evidence(config_path):
     backend = FakeBackend()
     regions, descriptions, features = inputs(101)
     original = copy.deepcopy(descriptions)
-    result = run_agent(sample(), regions, descriptions, features, backend, load_config())
+    result = run_agent(sample(), regions, descriptions, features, backend, load_config(config_path))
     assert [len(e['findings']) for e in result['process']] == [11, 6, 6, 6, 6]
     assert result['total_examined_regions'] == 35
     assert len({f['region']['region_id'] for f in backend.final[0]}) == 35
@@ -61,10 +62,11 @@ def test_ceil_full_denominator_unique_and_all_evidence():
     assert backend.queries == ['Which?'] + ['mitoses'] * 4
 
 
-def test_zoom_all_current_regions_uses_missing_info_and_stops():
+@pytest.mark.parametrize('config_path', ['configs/reproduce_v1.yaml', 'configs/reproduce_v2.yaml'])
+def test_zoom_all_current_regions_uses_missing_info_and_stops(config_path):
     regions, descriptions, features = inputs(101)
     backend = FakeBackend(zoom=True)
-    result = run_agent(sample(), regions, descriptions, features, backend, load_config())
+    result = run_agent(sample(), regions, descriptions, features, backend, load_config(config_path))
     assert len(backend.candidates) == 11 * 4
     assert len(result['process']) == 1
     assert len(backend.final[0]) == 12
@@ -73,11 +75,12 @@ def test_zoom_all_current_regions_uses_missing_info_and_stops():
     assert result['stop_reason'] == 'zoom_completed'
 
 
-def test_tiny_n_and_cases_are_isolated():
+@pytest.mark.parametrize('config_path', ['configs/reproduce_v1.yaml', 'configs/reproduce_v2.yaml'])
+def test_tiny_n_and_cases_are_isolated(config_path):
     regions, descriptions, features = inputs(1)
-    first = run_agent(sample('1'), regions, descriptions, features, FakeBackend(zoom=True), load_config())
+    first = run_agent(sample('1'), regions, descriptions, features, FakeBackend(zoom=True), load_config(config_path))
     backend = FakeBackend(sufficient=True)
-    second = run_agent(sample('2'), regions, descriptions, features, backend, load_config())
+    second = run_agent(sample('2'), regions, descriptions, features, backend, load_config(config_path))
     assert first['process'][0]['zoom_finding']['region']['scale'] == 10
     assert second['process'][0]['findings'][0]['region']['scale'] == 5
     assert backend.final[0][0]['description'] == 'generic\nobserved'

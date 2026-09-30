@@ -44,13 +44,21 @@ def select_smoke(samples, dataset):
 def main():
     import yaml
     parser = argparse.ArgumentParser()
-    parser.add_argument("dataset", choices=["pathmmu", "bcnb", "wsi_vqa"])
+    parser.add_argument("dataset", choices=["pathmmu", "bcnb", "wsi_vqa", "cptac"])
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument("--annotations-only", action="store_true")
+    parser.add_argument("--dataset-config", help="Explicit dataset config, e.g. the frozen BCNB 1,000-question subset")
+    parser.add_argument("--output", help="Manifest destination (use a separate path for subsets)")
     parser.add_argument("--available-images", action="store_true",
                         help="PathMMU execution check using downloaded originals only; not full-source smoke acceptance")
     args = parser.parse_args()
-    cfg = yaml.safe_load(resolve(f"configs/datasets/{args.dataset}.yaml").read_text())
+    if args.dataset == 'cptac' and args.smoke:
+        parser.error('CPTAC is annotations-only preparation; no smoke selection is defined')
+    if args.dataset_config and not args.output:
+        parser.error('--dataset-config requires --output to avoid replacing the full benchmark manifest')
+    cfg = yaml.safe_load(resolve(args.dataset_config or f"configs/datasets/{args.dataset}.yaml").read_text())
+    if cfg['name'] != args.dataset:
+        parser.error('Dataset config name must match the selected dataset')
     # Smoke validates its selected originals; unrelated missing test images must not
     # block this small execution check. Full manifests still require every image.
     partial_smoke = args.smoke and args.dataset in {"wsi_vqa", "pathmmu"}
@@ -82,7 +90,7 @@ def main():
                 if row["input_kind"] == "wsi" and source.mpp is None:
                     raise ValueError(f"No physical-scale metadata or declared MPP for {row['image_id']}")
     name = "smoke_available" if args.available_images else "smoke" if args.smoke else "annotations" if args.annotations_only else "full"
-    output = resolve(f"data/manifests/{args.dataset}/{name}.json")
+    output = resolve(args.output or f"data/manifests/{args.dataset}/{name}.json")
     write_manifest(output, samples, dataset=args.dataset, purpose="smoke" if args.smoke else name, dataset_config=cfg,
                    annotation_sha256=sha256_file(resolve(cfg["annotations"])),
                    summary=summarize(samples), images_verified=not args.annotations_only,

@@ -5,6 +5,7 @@ import numpy as np
 from data_processing.common import (ROOT, atomic_json, digest, read_json, resolve,
                                     sample_seed, seed_everything, sha256_file)
 from data_processing.regions import ImageSource, Region, whole_roi, wsi_region
+from models.protocols import protocol_manifest
 
 
 def prepare_regions(sample, config, source_hash):
@@ -47,7 +48,8 @@ def prepare_regions(sample, config, source_hash):
 
 
 def prepare_observations(directory, regions, backend, config):
-    key = digest({"models": config["models"], "generation": config["generation"], "seed": config["seed"]})
+    key = digest({"models": config["models"], "generation": config["generation"], "seed": config["seed"],
+                  "protocol": protocol_manifest(config)})
     cache = directory / f"observations_{key}.json"
     if cache.exists():
         value = read_json(cache)

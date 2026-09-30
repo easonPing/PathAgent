@@ -133,6 +133,22 @@ def load_pathmmu(annotation, image_root, require_images=True):
     return samples
 
 
+def load_cptac(annotation, image_root, require_images=True):
+    """Official SlideBench CPTAC annotations; Output is a model prediction, never input."""
+    index = image_index(image_root) if require_images else {}
+    samples = []
+    with open(resolve(annotation), encoding='utf-8-sig', newline='') as f:
+        for row in csv.DictReader(f):
+            image_id = row['Slide'].strip()
+            image = unique_image(index, image_id) if require_images else ''
+            samples.append(make_sample(
+                'cptac', 'test', row['ID'], image_id, image, row['Question'],
+                {k: row[k] for k in 'ABCD' if row.get(k, '').strip()}, row['Answer'],
+                task=row.get('Task', '').strip() or 'Tumor subtype', source=row['Tumor'],
+            ))
+    return samples
+
+
 def load_wsi_vqa(annotation, image_root, slide_map, require_images=True):
     data = read_json(resolve(annotation))
     mapping = read_json(resolve(slide_map)) if resolve(slide_map).exists() else {}
@@ -162,6 +178,11 @@ def load_benchmark(config, require_images=True):
         if expected_hash and sha256_file(resolve(args[0])) != expected_hash:
             raise ValueError("BCNB annotations differ from the pinned release")
         samples = load_bcnb(*args, assumed_mpp=config.get("assumed_mpp"), require_images=require_images)
+    elif name == "cptac":
+        expected_hash = config.get("annotation_sha256")
+        if expected_hash and sha256_file(resolve(args[0])) != expected_hash:
+            raise ValueError("CPTAC annotations differ from the pinned release")
+        samples = load_cptac(*args, require_images=require_images)
     elif name == "pathmmu":
         samples = load_pathmmu(*args, require_images=require_images)
     elif name == "wsi_vqa":

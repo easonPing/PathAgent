@@ -1,0 +1,91 @@
+{
+  "upstream_commit": "1e4d0377a4438b19d0e2dde6803db29f804ac8f4",
+  "prompts": {
+    "protocol": "paper-prompts-nonthinking-2x-v1",
+    "templates": {
+      "GENERIC_PROMPT": {
+        "text": "Please describe the pathology features in this image.",
+        "sha256": "c34094e26bf52b321e76e386eba6963bd6419f0a1236e12f68889edeb5cdc13b",
+        "published": true,
+        "source": "arxiv:2511.17052v1 sec/3_method.tex §3.1"
+      },
+      "QUESTION_PROMPT": {
+        "text": "Please describe the pathology features related to the question: {question} in this image.",
+        "sha256": "d41c78e424aa9d51277855e01697202e3cc66125db1b9936aaf8237f7bb3a07a",
+        "published": true,
+        "source": "arxiv:2511.17052v1 sec/3_method.tex §3.1"
+      },
+      "PERCEPTOR_SYSTEM": {
+        "text": "A conversation between a curious user and an AI medical assistant specialized in pathology image analysis. The assistant can interpret pathology images, describe observed features, and provide possible explanations based on medical knowledge, but will never give a definitive diagnosis or prescribe treatment. The assistant must always maintain a polite, clear, and professional tone. All answers should be supported by established, reliable medical sources. The assistant should carefully consider visual details in pathology images, such as cell morphology, staining patterns, and tissue architecture.",
+        "sha256": "3026aca60ab30356da35581c82f44b8c5fd8cd7669295956babca4297ff28638",
+        "published": true,
+        "source": "arxiv:2511.17052v1 sec/X_suppl.tex §Prompt"
+      },
+      "PREDICT_SYSTEM": {
+        "text": "You are an expert AI pathology assistant. Your task is trying to answer the question step-by-step based on the patch descriptions. Output ONLY a JSON object: {\"answer\": \"the final predicted answer (string)\", \"thinking_steps\": \"your detailed reasoning, step-by-step (string)\"}.",
+        "sha256": "bb67e53852c8bd0c66cdba094d5644a32ceeaa5aa31de7e20d22b4e909dd09e5",
+        "published": true,
+        "source": "arxiv:2511.17052v1 sec/X_suppl.tex §Prompt"
+      },
+      "REFLECT_SYSTEM": {
+        "text": "You are an expert AI pathology assistant. Your task is to judge whether the current patch descriptions are sufficient to confidently support the answer. Output ONLY a JSON object: {\"sufficient\": \"Yes\" or \"No\"}.",
+        "sha256": "a796ffe8e488b26b748f2eaa4b5bc52acd531bf01df4beb5302ece0112c3df42",
+        "published": true,
+        "source": "arxiv:2511.17052v1 sec/X_suppl.tex §Prompt"
+      },
+      "MISSING_SYSTEM": {
+        "text": "You are an expert AI pathology assistant. Your task is to specify what visual evidence is missing and whether zooming in could help obtain that evidence. Output ONLY a JSON object: {\"missing_info\": \"noun phrase\", \"zoom_recommendation\": \"Yes\" or \"No\", \"recommended_zoom_level\": \"None\" or an integer like 10 or 20 or 40, \"zoom_reason\": \"brief reason why zooming helps\"}.",
+        "sha256": "b0b71bf6ed8ebb00387953d527bb504326f2890dcadf9076546f1cecbe196596",
+        "published": true,
+        "source": "arxiv:2511.17052v1 sec/X_suppl.tex §Prompt"
+      },
+      "FINAL_SYSTEM": {
+        "text": "You are an expert slide-level pathology assistant. You will be given a question and detailed patch-level descriptions of a pathology slide. Your task is to infer the specific slide-level diagnostic result based on the provided evidence — not to define or explain the medical term itself. The answer should directly reflect the information observable in the slide, such as biomarker expression level, presence or absence of features, or a numeric measurement.",
+        "sha256": "f24dd24d9e1b61560aa597b27a96881769ad3373f839b21cb69aaa4469cb2880",
+        "published": true,
+        "source": "arxiv:2511.17052v1 sec/X_suppl.tex §Prompt"
+      },
+      "SUMMARY_SYSTEM": {
+        "text": "Summarize visible pathological findings, preserving region coordinates and each region's scale. Do not give a final answer or diagnosis.",
+        "sha256": "f8349d805ea70de8efbfa3877f123f77181f96f093ceab6d1514cdb594e79296",
+        "published": false,
+        "source": "author 8c2abee models/inference.py wrapper adapted to Algorithm 1; summary/retry are engineering defaults"
+      },
+      "PREDICT_USER": {
+        "text": "--- Patch Descriptions ---\n{description}\n--- End ---\nQuestion: {question}{choices}\nNow output the JSON with 'answer' and 'thinking_steps'.",
+        "sha256": "784477d9dd16f142b823a153b789fe047fc9803980c2252dce22b9885b0c64de",
+        "published": false,
+        "source": "author 8c2abee models/inference.py wrapper adapted to Algorithm 1; summary/retry are engineering defaults"
+      },
+      "REFLECT_USER": {
+        "text": "Descriptions:\n{description}\n\nQuestion: {question}{choices}\n\nPrevious answer and reasoning:\n{answer}\n\nOnly return a JSON object: {{\"sufficient\": \"Yes\" or \"No\"}}",
+        "sha256": "41eec4737b5d6aa6aea7656097730f7a55c6cd910432630838c3d5a810aa3d52",
+        "published": false,
+        "source": "author 8c2abee models/inference.py wrapper adapted to Algorithm 1; summary/retry are engineering defaults"
+      },
+      "MISSING_USER": {
+        "text": "Descriptions:\n{description}\n\nQuestion: {question}{choices}\n\nNow provide the JSON for missing info and zoom recommendation.\nScale means {scale_description}. Available zoom levels: {allowed_scales}.",
+        "sha256": "49f2f8716b245c4f8d4591e68f68b581e394088914bf84fd30508511ffce5006",
+        "published": false,
+        "source": "author 8c2abee models/inference.py wrapper adapted to Algorithm 1; summary/retry are engineering defaults"
+      },
+      "FINAL_USER": {
+        "text": "Question: {question}{choices}\n\nNow, based on the following patch-level descriptions of the slide, determine the **slide-level result** that directly answers the question.\n\n--- Patch Descriptions ---\n{description}\n--- End of Descriptions ---\n\nPrior inferences and actions:\n{history}\n\nAnswer in JSON format with keys \"answer\" and \"explanation\" (both strings). If choices are provided, answer must be exactly one option text or its label.",
+        "sha256": "f7bb595ab1fb2640064f7bb99a6717182cbf232df3babe630366c360a43153e7",
+        "published": false,
+        "source": "author 8c2abee models/inference.py wrapper adapted to Algorithm 1; summary/retry are engineering defaults"
+      },
+      "RETRY_USER": {
+        "text": "Return one valid JSON object with the required keys and valid field values only.",
+        "sha256": "3ef3e0c13b12c3ffd07586db110ffd5f815870fa265039ba6ce431f104d8013d",
+        "published": false,
+        "source": "author 8c2abee models/inference.py wrapper adapted to Algorithm 1; summary/retry are engineering defaults"
+      }
+    },
+    "notes": [
+      "Zoom reuses the published question template.",
+      "Executor user wrappers are not fully published.",
+      "ROI scale adapter is relative, not physical magnification."
+    ]
+  }
+}

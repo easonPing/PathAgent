@@ -1,0 +1,8 @@
+name: cptac
+annotations: data/raw/cptac/SlideBench-VQA-CPTAC.csv
+image_root: data/raw/cptac/images
+annotation_revision: aa1aa40b78564b094e3c3305918ec7f7fc1ba5af
+annotation_sha256: a82b1de1e04344ce9b1f78836a3e5bcb8c3d4d0ec56889602d46fb22bdaeb799
+expected_questions: 240
+expected_images: 240
+input_kind: wsi

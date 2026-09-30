@@ -63,6 +63,7 @@ def main():
     import yaml
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('dataset', choices=['pathmmu', 'bcnb'])
+    parser.add_argument('--config', default='configs/reproduce_v1.yaml')
     parser.add_argument('--skip-smoke', action='store_true', required=True,
                         help='Explicit user-authorized waiver, not a successful smoke attestation')
     parser.add_argument('--submit', action='store_true', help='Actually submit; otherwise prepare only')
@@ -78,7 +79,7 @@ def main():
         parser.error('Estimates and minimum VRAM must be positive')
     if not 1 <= args.concurrency <= min(args.shards, 32):
         parser.error('Concurrency must be between 1 and min(shards, 32)')
-    config = load_config()
+    config = load_config(args.config)
     config['slurm']['shards'] = args.shards
     check_assets(config)
     source_hash = code_hash()

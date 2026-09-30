@@ -1,4 +1,4 @@
-> **论文优先复现分支**：当前可执行入口、参数差异和调度步骤见 [docs/REPRODUCTION.md](docs/REPRODUCTION.md)，已完成工作与剩余阻塞见 [docs/IMPLEMENTATION_STATUS.md](docs/IMPLEMENTATION_STATUS.md)。下面是作者原始 README；其中 CLAM/Quilt 和旧 pathagent CLI 不适用于本分支的新 runner。
+> **论文优先复现分支**：旧流程配置为 [configs/reproduce_v1.yaml](configs/reproduce_v1.yaml)，新流程配置为 [configs/reproduce_v2.yaml](configs/reproduce_v2.yaml)。同一分支切换新旧 BF16 流程见 [docs/PIPELINE_COMPARISON.md](docs/PIPELINE_COMPARISON.md)，两套 Perceptor 均继承 checkpoint 采样。原有复现参数与调度步骤见 [docs/REPRODUCTION.md](docs/REPRODUCTION.md)，历史实施状态见 [docs/IMPLEMENTATION_STATUS.md](docs/IMPLEMENTATION_STATUS.md)。下面是作者原始 README；其中 CLAM/Quilt 和旧 pathagent CLI 不适用于本分支的新 runner。
 
 # [ECCV 2026] PathAgent: Toward Interpretable Analysis of Whole-slide Pathology Images via Large Language Model-based Agentic Reasoning 
 [![Project Page](https://img.shields.io/badge/Project-Page-green)](https://github.com/G14nTDo4/PathAgent)
