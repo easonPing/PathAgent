@@ -2,13 +2,77 @@
 import subprocess
 import time
 import numpy as np
+from functools import lru_cache
+from pathlib import Path
 from data_processing.common import (ROOT, atomic_json, digest, read_json, resolve,
                                     sample_seed, seed_everything, sha256_file)
 from data_processing.regions import ImageSource, Region, whole_roi, wsi_region
 from models.protocols import protocol_manifest
 
 
+@lru_cache(maxsize=8)
+def _initial_manifest(path, expected_hash):
+    if sha256_file(path) != expected_hash:
+        raise ValueError('Frozen initial input manifest changed')
+    value = read_json(path)
+    if value.get('schema_version') != 1 or value.get('kind') != 'frozen_initial_inputs':
+        raise ValueError('Unsupported frozen initial input manifest')
+    return value
+
+
+@lru_cache(maxsize=4096)
+def _initial_file(path, expected_hash):
+    if sha256_file(path) != expected_hash:
+        raise ValueError('Frozen initial input file changed: ' + path)
+    return read_json(path)
+
+
+@lru_cache(maxsize=4096)
+def _initial_image(path, expected_hash):
+    if sha256_file(path) != expected_hash:
+        raise ValueError('Frozen original image changed: ' + path)
+
+
+def frozen_initial_inputs(config):
+    """Optional read-only input adapter; legacy cache identity remains untouched."""
+    path = config['runtime'].get('initial_inputs_manifest')
+    if path is None:
+        return None
+    value = _initial_manifest(str(resolve(path)), config['runtime']['initial_inputs_hash'])
+    contract = value['contract']
+    for key in ('seed', 'models', 'generation', 'preprocessing'):
+        if config[key] != contract[key]:
+            raise ValueError('Frozen initial input contract mismatch: ' + key)
+    if config['algorithm']['initial_magnification'] != contract['initial_magnification']:
+        raise ValueError('Frozen initial input scale mismatch')
+    prompts = protocol_manifest(config)['templates']
+    required = {'PERCEPTOR_SYSTEM', 'GENERIC_PROMPT', 'QUESTION_PROMPT', 'PERCEPTOR_USER', 'ZOOM_MISSING_USER'}
+    if set(contract['perceptor_prompt_hashes']) != required:
+        raise ValueError('Incomplete frozen Perceptor prompt contract')
+    for name, expected in contract['perceptor_prompt_hashes'].items():
+        if prompts[name]['sha256'] != expected:
+            raise ValueError('Frozen Perceptor prompt mismatch: ' + name)
+    return value
+
+
 def prepare_regions(sample, config, source_hash):
+    frozen = frozen_initial_inputs(config)
+    if frozen is not None:
+        record = frozen['images'].get(str(sample['image_id']))
+        if record is None or str(Path(resolve(sample['image_path'])).resolve()) != record['image_path']:
+            raise ValueError('Image not in frozen initial inputs')
+        if any(key not in record or sample.get(key) != record[key]
+               for key in ('dataset', 'input_kind', 'assumed_mpp')):
+            raise ValueError('Frozen image geometry contract mismatch')
+        _initial_image(record['image_path'], record['image_sha256'])
+        directory = Path(record['directory'])
+        value = _initial_file(str(directory / 'regions.json'), record['regions_sha256'])
+        if value['image_sha256'] != record['image_sha256']:
+            raise ValueError('Frozen image provenance mismatch')
+        regions = [Region(**r) for r in value['regions']]
+        if not regions or any(r.image_path != record['image_path'] for r in regions):
+            raise ValueError('Frozen region image identity mismatch')
+        return directory, regions
     image_hash = sha256_file(sample["image_path"])
     key = digest({"image": image_hash, "image_path": str(resolve(sample["image_path"])), "kind": sample["input_kind"],
                   "mpp": sample["assumed_mpp"], "preprocessing": config["preprocessing"],
@@ -48,6 +112,17 @@ def prepare_regions(sample, config, source_hash):
 
 
 def prepare_observations(directory, regions, backend, config):
+    frozen = frozen_initial_inputs(config)
+    if frozen is not None:
+        records = [r for r in frozen['images'].values() if r['directory'] == str(directory)]
+        if len(records) != 1:
+            raise ValueError('Unknown frozen observation directory')
+        record = records[0]
+        value = _initial_file(str(directory / 'observations.json'), record['observations_sha256'])
+        ids = {r.region_id for r in regions}
+        if ids != set(value['descriptions']) or ids != set(value['features']):
+            raise ValueError('Frozen observation coverage mismatch')
+        return value['descriptions'], value['features']
     key = digest({"models": config["models"], "generation": config["generation"], "seed": config["seed"],
                   "protocol": protocol_manifest(config)})
     cache = directory / f"observations_{key}.json"

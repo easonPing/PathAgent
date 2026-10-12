@@ -61,12 +61,27 @@ def load_config(path="configs/reproduce_v1.yaml"):
                 "zoom_query": "missing_info", "zoom_selected_children": 1}
     if any(config["algorithm"].get(k) != v for k, v in required.items()):
         raise ValueError("Algorithm differs from the frozen paper reproduction protocol")
+    if type(config['algorithm'].get('zoom_return_to_loop', False)) is not bool:
+        raise ValueError('zoom_return_to_loop must be a boolean')
+    snapshot = config['runtime'].get('initial_inputs_manifest')
+    snapshot_hash = config['runtime'].get('initial_inputs_hash')
+    if (snapshot is None) != (snapshot_hash is None):
+        raise ValueError('Frozen initial input manifest and hash must be supplied together')
+    if snapshot is not None:
+        if (not isinstance(snapshot, str) or not snapshot
+                or not isinstance(snapshot_hash, str)
+                or len(snapshot_hash) != 64
+                or any(c not in '0123456789abcdef' for c in snapshot_hash)):
+            raise ValueError('Frozen initial inputs require a manifest and SHA256')
     if any(config["generation"][k] is not False for k in ["enable_thinking", "final_do_sample", "summary_do_sample"]):
         raise ValueError("Generation flags differ from the frozen reproduction protocol")
     if any(config["generation"][k] != "checkpoint" for k in ["executor_sampling", "perceptor_sampling"]):
         raise ValueError("Predict/reflect/describe sampling must use the pinned checkpoint configuration")
-    if config["slurm"]["shards"] not in {16, 128} or config["slurm"]["max_concurrent_gpus"] != 32:
-        raise ValueError("Approved execution layouts use 16 or 128 shards and at most 32 GPUs")
+    shards = config["slurm"]["shards"]
+    concurrency = config["slurm"].get("max_concurrent_gpus")
+    if (type(shards) is not int or shards not in {6, 10, 16, 128}
+            or (concurrency is not None and (type(concurrency) is not int or concurrency != 32))):
+        raise ValueError("Approved layouts use 6, 10, 16 or 128 shards; GPU concurrency is 32 or null (scheduler controlled)")
     if protocol in (PAPER_PROTOCOL, CONTEXT_PROTOCOL):
         caps = {'step_a_tokens': 1024, 'step_b_tokens': 512, 'step_c_tokens': 512,
                 'generic_description_tokens': 1024, 'question_description_tokens': 2048,
