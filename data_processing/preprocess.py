@@ -56,6 +56,9 @@ def frozen_initial_inputs(config):
 
 
 def prepare_regions(sample, config, source_hash):
+    if config.get('protocol') == 'pathology-rules-v2':
+        from data_processing.rules_v2_inputs import prepare_regions_v2
+        return prepare_regions_v2(sample, config)
     frozen = frozen_initial_inputs(config)
     if frozen is not None:
         record = frozen['images'].get(str(sample['image_id']))
@@ -112,6 +115,9 @@ def prepare_regions(sample, config, source_hash):
 
 
 def prepare_observations(directory, regions, backend, config):
+    if config.get('protocol') == 'pathology-rules-v2':
+        from data_processing.rules_v2_inputs import prepare_observations_v2
+        return prepare_observations_v2(directory, regions, backend, config)
     frozen = frozen_initial_inputs(config)
     if frozen is not None:
         records = [r for r in frozen['images'].values() if r['directory'] == str(directory)]

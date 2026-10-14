@@ -233,7 +233,7 @@ def test_resource_extension_does_not_relax_generation_or_algorithm(tmp_path, sha
 def test_snapshot_info_imports_the_frozen_prompt_source(tmp_path):
     from slurm.rule_prompts import build_variant_sources
     source = tmp_path / 'source'
-    files = ('pathagent.py', 'data_processing/common.py', 'models/protocols.py',
+    files = ('pathagent.py', 'data_processing/common.py', 'models/protocols.py', 'models/region_selection.py',
              'models/paper_prompts.py', 'models/context_prompts.py')
     for relative in files:
         target = source / relative

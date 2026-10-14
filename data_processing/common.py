@@ -5,7 +5,8 @@ import os
 import random
 import tempfile
 from pathlib import Path
-from models.protocols import PAPER_PROTOCOL, CONTEXT_PROTOCOL, protocol_name, protocol_manifest
+from models.protocols import PAPER_PROTOCOL, CONTEXT_PROTOCOL, RULES_V2_PROTOCOL, protocol_name, protocol_manifest
+from models.region_selection import selection_policy
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -56,13 +57,26 @@ def load_config(path="configs/reproduce_v1.yaml"):
     if config.get("schema_version") != 1:
         raise ValueError("Unsupported reproduction config schema")
     protocol = protocol_name(config)
-    required = {"max_iterations": 5, "initial_ratio": .10, "replenish_ratio": .05,
+    policy = selection_policy(config['algorithm'])
+    required = {"max_iterations": 5, "initial_ratio": .10, "replenish_ratio": .10 if policy == 'max5' else .05,
                 "question_description_topk": 5, "initial_magnification": 5,
-                "zoom_query": "missing_info", "zoom_selected_children": 1}
+                "zoom_query": "missing_info", "zoom_selected_children": 5 if policy == 'max5' or protocol == RULES_V2_PROTOCOL else 1}
     if any(config["algorithm"].get(k) != v for k, v in required.items()):
         raise ValueError("Algorithm differs from the frozen paper reproduction protocol")
     if type(config['algorithm'].get('zoom_return_to_loop', False)) is not bool:
         raise ValueError('zoom_return_to_loop must be a boolean')
+    if protocol == RULES_V2_PROTOCOL:
+        from models.rules_v2_prompts import flags_for_variant
+        flags_for_variant(config.get('rules_v2', {}).get('variant'))
+        if not config['algorithm'].get('zoom_return_to_loop'):
+            raise ValueError('rules-v2 requires post-Zoom review')
+        if config['runtime'].get('initial_inputs_manifest'):
+            raise ValueError('rules-v2 uses a separate staged-input contract')
+        v2_path = config['runtime'].get('rules_v2_initial_inputs_manifest')
+        v2_hash = config['runtime'].get('rules_v2_initial_inputs_hash')
+        if (not isinstance(v2_path, str) or not v2_path or not isinstance(v2_hash, str)
+                or len(v2_hash) != 64 or any(c not in '0123456789abcdef' for c in v2_hash)):
+            raise ValueError('rules-v2 requires frozen geometry and SHA256')
     snapshot = config['runtime'].get('initial_inputs_manifest')
     snapshot_hash = config['runtime'].get('initial_inputs_hash')
     if (snapshot is None) != (snapshot_hash is None):
@@ -82,7 +96,7 @@ def load_config(path="configs/reproduce_v1.yaml"):
     if (type(shards) is not int or shards not in {6, 10, 16, 128}
             or (concurrency is not None and (type(concurrency) is not int or concurrency != 32))):
         raise ValueError("Approved layouts use 6, 10, 16 or 128 shards; GPU concurrency is 32 or null (scheduler controlled)")
-    if protocol in (PAPER_PROTOCOL, CONTEXT_PROTOCOL):
+    if protocol in (PAPER_PROTOCOL, CONTEXT_PROTOCOL, RULES_V2_PROTOCOL):
         caps = {'step_a_tokens': 1024, 'step_b_tokens': 512, 'step_c_tokens': 512,
                 'generic_description_tokens': 1024, 'question_description_tokens': 2048,
                 'final_tokens': 2048, 'summary_tokens': 1024}

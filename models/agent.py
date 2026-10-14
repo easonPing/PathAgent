@@ -1,10 +1,12 @@
 """Paper Algorithm 1; model-independent to allow deterministic control-flow tests."""
-import math
 import time
 from copy import deepcopy
 import numpy as np
 from data_processing.datasets import public_input
 from data_processing.regions import zoom_regions
+from models.region_selection import (
+    low_region_count, question_region_count, selection_policy, zoom_region_count,
+)
 
 
 def unit_rows(features):
@@ -32,6 +34,9 @@ def retrieve(names, embeddings, query_embedding, k):
 
 def run_agent(sample, regions, descriptions, features, backend, config):
     """Keep the frozen path unless the explicit Zoom continuation flag is enabled."""
+    if config.get('protocol') == 'pathology-rules-v2':
+        from models.rules_v2_agent import run_agent_v2
+        return run_agent_v2(sample, regions, descriptions, features, backend, config)
     enabled = config["algorithm"].get("zoom_return_to_loop", False)
     if type(enabled) is not bool:
         raise ValueError("zoom_return_to_loop must be a boolean")
@@ -53,7 +58,7 @@ def _run_agent_legacy(sample, regions, descriptions, features, backend, config):
     descriptions = deepcopy(descriptions)
     n = len(names)
     current = retrieve(names, [features[p] for p in names], backend.encode_text(sample["question"]),
-                       math.ceil(n * algorithm["initial_ratio"]))
+                       low_region_count(algorithm, n, initial=True))
     visited, evidence, trajectory = set(), [], []
     stop_reason = None
     started = time.monotonic()
@@ -64,7 +69,7 @@ def _run_agent_legacy(sample, regions, descriptions, features, backend, config):
         if visited.intersection(current):
             raise RuntimeError("Already examined region selected")
         visited.update(current)
-        for name in current[:algorithm["question_description_topk"]]:
+        for name in current[:question_region_count(algorithm, len(current))]:
             descriptions[name] += "\n" + backend.describe(by_id[name], sample["question"])
         findings = [{"region": by_id[p].to_dict(), "description": descriptions[p]} for p in current]
         evidence.extend(findings)
@@ -89,13 +94,17 @@ def _run_agent_legacy(sample, regions, descriptions, features, backend, config):
             event.update(zoom_candidate_count=len(candidates), zoom_query=missing)
             if candidates:
                 embeddings = backend.encode_regions(candidates)
-                selected_id = retrieve([r.region_id for r in candidates], embeddings,
-                                       backend.encode_text(missing), 1)[0]
-                selected = next(r for r in candidates if r.region_id == selected_id)
-                finding = {"region": selected.to_dict(),
-                           "description": backend.describe(selected, sample["question"], missing_info=missing)}
-                evidence.append(finding)
-                event["zoom_finding"] = finding
+                selected_ids = retrieve([r.region_id for r in candidates], embeddings,
+                                        backend.encode_text(missing), zoom_region_count(algorithm, len(candidates)))
+                child_by_id = {r.region_id: r for r in candidates}
+                acquired = [{"region": child_by_id[name].to_dict(),
+                             "description": backend.describe(child_by_id[name], sample["question"], missing_info=missing)}
+                            for name in selected_ids]
+                evidence.extend(acquired)
+                if selection_policy(algorithm) == 'max5':
+                    event.update(zoom_findings=acquired, selected_children=selected_ids)
+                else:
+                    event["zoom_finding"] = acquired[0]
                 stop_reason = "zoom_completed"
             else:
                 stop_reason = "zoom_has_no_valid_children"
@@ -109,7 +118,7 @@ def _run_agent_legacy(sample, regions, descriptions, features, backend, config):
             stop_reason = "no_unexamined_regions"
             break
         current = retrieve(remaining, [features[p] for p in remaining], backend.encode_text(missing),
-                           math.ceil(n * algorithm["replenish_ratio"]))
+                           low_region_count(algorithm, n, initial=False))
         event["next_regions"] = current
     final = backend.conclude(evidence, trajectory, sample)
     return {"pred_answer": final["answer"], "explanation": final["explanation"], "status": "ok",
@@ -139,7 +148,7 @@ def _run_agent_zoom_loop(sample, regions, descriptions, features, backend, confi
     descriptions = deepcopy(descriptions)
     n = len(names)
     current = retrieve(names, [features[p] for p in names], backend.encode_text(sample["question"]),
-                       math.ceil(n * algorithm["initial_ratio"]))
+                       low_region_count(algorithm, n, initial=True))
     visited, evidence, trajectory = set(), [], []
     visited_zoom, active_zoom = set(), []
     current_findings = []
@@ -154,7 +163,7 @@ def _run_agent_zoom_loop(sample, regions, descriptions, features, backend, confi
             if visited.intersection(current):
                 raise RuntimeError("Already examined region selected")
             visited.update(current)
-            for name in current[:algorithm["question_description_topk"]]:
+            for name in current[:question_region_count(algorithm, len(current))]:
                 descriptions[name] += "\n" + backend.describe(by_id[name], sample["question"])
             current_findings = [{"region": by_id[p].to_dict(), "description": descriptions[p]} for p in current]
             evidence.extend(current_findings)
@@ -193,15 +202,19 @@ def _run_agent_zoom_loop(sample, regions, descriptions, features, backend, confi
                 stop_reason = "zoom_has_no_unvisited_children" if all_candidates else "zoom_has_no_valid_children"
                 break
             embeddings = backend.encode_regions(candidates)
-            selected_id = retrieve([r.region_id for r in candidates], embeddings,
-                                   backend.encode_text(missing), 1)[0]
-            selected = next(r for r in candidates if r.region_id == selected_id)
-            finding = {"region": selected.to_dict(),
-                       "description": backend.describe(selected, sample["question"], missing_info=missing)}
-            visited_zoom.add(selected_id)
-            active_zoom.append(finding)
-            evidence.append(finding)
-            event["zoom_finding"] = finding
+            selected_ids = retrieve([r.region_id for r in candidates], embeddings,
+                                    backend.encode_text(missing), zoom_region_count(algorithm, len(candidates)))
+            child_by_id = {r.region_id: r for r in candidates}
+            acquired = [{"region": child_by_id[name].to_dict(),
+                         "description": backend.describe(child_by_id[name], sample["question"], missing_info=missing)}
+                        for name in selected_ids]
+            visited_zoom.update(selected_ids)
+            active_zoom.extend(acquired)
+            evidence.extend(acquired)
+            if selection_policy(algorithm) == 'max5':
+                event.update(zoom_findings=acquired, selected_children=selected_ids)
+            else:
+                event["zoom_finding"] = acquired[0]
             event.update(actual_action="zoom", action_executed=True)
             continue
         event["action"] = "explore"
@@ -214,7 +227,7 @@ def _run_agent_zoom_loop(sample, regions, descriptions, features, backend, confi
             stop_reason = "no_unexamined_regions"
             break
         current = retrieve(remaining, [features[p] for p in remaining], backend.encode_text(missing),
-                           math.ceil(n * algorithm["replenish_ratio"]))
+                           low_region_count(algorithm, n, initial=False))
         event["next_regions"] = current
         event.update(actual_action="explore" if current else None, action_executed=bool(current))
         active_zoom = []
